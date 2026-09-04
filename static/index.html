@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MuJoCo Controller Lab</title>
+  <style>
+    :root { color-scheme: dark; font-family: ui-sans-serif, system-ui, sans-serif; }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #0d1117; color: #e6edf3; }
+    main { width: min(1180px, 96vw); margin: 20px auto; }
+    header { display:flex; justify-content:space-between; align-items:baseline; gap:16px; }
+    h1 { margin:0 0 12px; font-size:1.35rem; } h2 { margin:0 0 9px; font-size:.95rem; }
+    #connection { color:#f0b429; } #connection.online { color:#3fb950; }
+    .stage { position:relative; overflow:hidden; border:1px solid #30363d; border-radius:12px; background:#000; }
+    #view { display:block; width:100%; aspect-ratio:4/3; object-fit:contain; cursor:crosshair; }
+    .hud { position:absolute; left:12px; top:12px; padding:7px 10px; border-radius:7px; background:#000b; font:13px ui-monospace,monospace; max-width:calc(100% - 24px); }
+    .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:12px; margin-top:14px; }
+    .card { border:1px solid #30363d; border-radius:10px; padding:12px; background:#161b22; }
+    .keys,.row { display:flex; flex-wrap:wrap; gap:7px; }
+    button,select { border:1px solid #484f58; border-radius:7px; padding:8px 10px; background:#21262d; color:inherit; cursor:pointer; }
+    button:active,button.active { background:#1f6feb; }
+    p { margin:6px 0; color:#9da7b3; font-size:.88rem; }
+    label { font-size:.88rem; } input[type="range"] { width:100%; accent-color:#2f81f7; }
+    .metric { display:grid; grid-template-columns:1fr auto; gap:5px 12px; font:12px ui-monospace,monospace; }
+    .metric span:nth-child(even) { color:#58a6ff; }
+    #lossChart { width:100%; height:100px; margin-top:8px; background:#0d1117; border-radius:6px; }
+    #sampleDetails { white-space:pre-wrap; font:12px ui-monospace,monospace; color:#b7c1cc; }
+  </style>
+</head>
+<body><main>
+  <header><h1>MuJoCo · Pluggable Controller Lab</h1><span id="connection">Connecting…</span></header>
+  <div class="stage"><canvas id="view" width="800" height="600"></canvas><div class="hud" id="hud">Waiting…</div></div>
+  <div class="grid">
+    <section class="card">
+      <h2>Inference controller</h2>
+      <select id="controller"></select>
+      <p>Click the rendered robot plane to set a target for the selected controller.</p>
+      <label>Joint command speed: <strong id="speedValue">1.0 rad/s</strong></label>
+      <input id="speed" type="range" min="0.1" max="2.5" step="0.1" value="1.0">
+    </section>
+    <section class="card">
+      <h2>Training-data episode</h2>
+      <div class="row"><button id="previous">Previous</button><button id="random">Random</button><button id="next">Next</button></div>
+      <p><label><input id="usePrediction" type="checkbox" checked> Move to MLP prediction</label></p>
+      <p>Unchecked plays the analytic supervised label.</p>
+      <div id="sampleDetails">Load an episode to inspect it.</div>
+    </section>
+    <section class="card">
+      <h2>Training objective and validation</h2>
+      <div class="metric" id="metrics"><span>No trained model loaded</span></div>
+      <canvas id="lossChart" width="460" height="100"></canvas>
+    </section>
+    <section class="card">
+      <h2>Manual joints</h2>
+      <div class="keys"><button data-key="q">Q Shoulder +</button><button data-key="a">A Shoulder −</button><button data-key="w">W Elbow +</button><button data-key="s">S Elbow −</button></div>
+    </section>
+    <section class="card">
+      <h2>Camera</h2>
+      <div class="keys"><button data-key="arrowleft">← Orbit</button><button data-key="arrowright">Orbit →</button><button data-key="arrowup">↑ Elevate</button><button data-key="arrowdown">Lower ↓</button><button data-key="=">+ Zoom</button><button data-key="-">− Zoom</button></div>
+    </section>
+    <section class="card">
+      <h2>Simulation</h2>
+      <div class="keys"><button data-key=" ">Space Pause</button><button data-key="r">R Reset</button><button data-key="c">C Reset camera</button></div>
+    </section>
+  </div>
+</main><script>
+const canvas=document.querySelector('#view'),ctx=canvas.getContext('2d');
+const hud=document.querySelector('#hud'),connection=document.querySelector('#connection');
+const speed=document.querySelector('#speed'),speedValue=document.querySelector('#speedValue');
+const controller=document.querySelector('#controller'),sampleDetails=document.querySelector('#sampleDetails');
+const usePrediction=document.querySelector('#usePrediction');
+let socket,sampleIndex=0,sampleCount=0; const held=new Set();
+function send(payload){if(socket?.readyState===WebSocket.OPEN)socket.send(JSON.stringify(payload));}
+function sendKey(key,down){key=key.toLowerCase();if(!socket||socket.readyState!==WebSocket.OPEN)return;if(down&&held.has(key))return;down?held.add(key):held.delete(key);send({type:'key',key,down});document.querySelectorAll('[data-key]').forEach(b=>{if(b.dataset.key===key)b.classList.toggle('active',down)});}
+function drawHistory(history){const c=document.querySelector('#lossChart'),g=c.getContext('2d');g.clearRect(0,0,c.width,c.height);if(!history?.length)return;const values=history.map(x=>x.mean_cartesian_error_m),max=Math.max(...values),min=Math.min(...values);g.strokeStyle='#3fb950';g.lineWidth=2;g.beginPath();values.forEach((v,i)=>{const x=8+i*(c.width-16)/Math.max(1,values.length-1),y=8+(v-min)/Math.max(1e-9,max-min)*(c.height-16);i?g.lineTo(x,c.height-y):g.moveTo(x,c.height-y)});g.stroke();}
+async function loadInfo(){const info=await fetch('/api/info').then(r=>r.json());controller.innerHTML='';info.controllers.forEach(name=>{const o=document.createElement('option');o.value=name;o.textContent=name;o.selected=name===info.active_controller;controller.appendChild(o)});sampleCount=info.training_samples;const m=info.training_metrics;if(m){document.querySelector('#metrics').innerHTML=`<span>Architecture</span><span>${m.architecture}</span><span>Objective</span><span>${m.objective}</span><span>Generated samples</span><span>${m.samples}</span><span>Best mean Cartesian error</span><span>${(1000*m.best_mean_cartesian_error_m).toFixed(2)} mm</span>`;drawHistory(m.history);}}
+function connect(){socket=new WebSocket(`${location.protocol==='https:'?'wss':'ws'}://${location.host}/ws`);socket.binaryType='blob';socket.onopen=()=>{connection.textContent='● Live';connection.className='online';send({type:'speed',value:Number(speed.value)});loadInfo()};socket.onclose=()=>{connection.textContent='Reconnecting…';connection.className='';held.clear();setTimeout(connect,1000)};socket.onmessage=async e=>{if(typeof e.data==='string'){const s=JSON.parse(e.data);hud.textContent=`${s.message} | error ${s.error.toFixed(3)} m | q [${s.qpos.map(v=>v.toFixed(2)).join(', ')}]`;if(s.sample){const p=s.sample.prediction_q;sampleDetails.textContent=`sample ${s.sample.index}/${s.sample.count-1}\nstart q: [${s.sample.start_q.map(v=>v.toFixed(2)).join(', ')}]\nlabel q: [${s.sample.label_q.map(v=>v.toFixed(2)).join(', ')}]\npred q:  ${p?'['+p.map(v=>v.toFixed(2)).join(', ')+']':'unavailable'}\npred Cartesian error: ${s.sample.prediction_cartesian_error_m===null?'n/a':(1000*s.sample.prediction_cartesian_error_m).toFixed(2)+' mm'}\nplaying: ${s.sample.playing}`}}else{const bitmap=await createImageBitmap(e.data);ctx.drawImage(bitmap,0,0,canvas.width,canvas.height);bitmap.close()}};}
+let draggingTarget=false,lastTargetSend=0;
+function placeTarget(e,force=false){
+  const now=performance.now();
+  if(!force&&now-lastTargetSend<33)return;
+  lastTargetSend=now;
+  const r=canvas.getBoundingClientRect();
+  send({type:'target',x:2*(e.clientX-r.left)/r.width-1,y:1-2*(e.clientY-r.top)/r.height});
+}
+canvas.addEventListener('pointerdown',e=>{
+  if(e.button!==0)return;
+  e.preventDefault();draggingTarget=true;canvas.setPointerCapture(e.pointerId);placeTarget(e,true);
+});
+canvas.addEventListener('pointermove',e=>{if(draggingTarget)placeTarget(e)});
+canvas.addEventListener('pointerup',e=>{
+  if(!draggingTarget)return;
+  placeTarget(e,true);draggingTarget=false;canvas.releasePointerCapture(e.pointerId);
+});
+canvas.addEventListener('pointercancel',()=>{draggingTarget=false});
+speed.addEventListener('input',()=>{speedValue.textContent=`${Number(speed.value).toFixed(1)} rad/s`;send({type:'speed',value:Number(speed.value)})});controller.addEventListener('change',()=>send({type:'controller',name:controller.value}));
+function showSample(){if(sampleCount)send({type:'training_sample',index:sampleIndex,prediction:usePrediction.checked});}
+document.querySelector('#previous').onclick=()=>{sampleIndex=(sampleIndex-1+sampleCount)%sampleCount;showSample()};document.querySelector('#next').onclick=()=>{sampleIndex=(sampleIndex+1)%sampleCount;showSample()};document.querySelector('#random').onclick=()=>{sampleIndex=Math.floor(Math.random()*sampleCount);showSample()};usePrediction.onchange=showSample;
+addEventListener('keydown',e=>{if(['q','a','w','s','r','c',' ','arrowleft','arrowright','arrowup','arrowdown','-','=','+'].includes(e.key.toLowerCase())){e.preventDefault();sendKey(e.key,true)}});addEventListener('keyup',e=>sendKey(e.key,false));addEventListener('blur',()=>[...held].forEach(k=>sendKey(k,false)));document.querySelectorAll('[data-key]').forEach(b=>{const k=b.dataset.key;b.onpointerdown=e=>{e.preventDefault();b.setPointerCapture(e.pointerId);sendKey(k,true)};b.onpointerup=()=>sendKey(k,false);b.onpointercancel=()=>sendKey(k,false)});connect();
+</script></body></html>

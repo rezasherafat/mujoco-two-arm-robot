@@ -1,0 +1,66 @@
+<mujoco model="two_link_planar_arm">
+  <compiler angle="radian" autolimits="true"/>
+  <option timestep="0.002" gravity="0 0 -9.81" integrator="implicitfast"/>
+
+  <visual>
+    <global offwidth="960" offheight="720"/>
+    <headlight ambient="0.35 0.35 0.35" diffuse="0.7 0.7 0.7" specular="0.2 0.2 0.2"/>
+  </visual>
+
+  <default>
+    <joint type="hinge" axis="0 1 0" limited="true" damping="0.2" armature="0.01"/>
+    <geom type="capsule" density="300" contype="1" conaffinity="1"/>
+    <position ctrllimited="true" forcelimited="true" dampratio="1.0"/>
+  </default>
+
+  <worldbody>
+    <light name="key_light" pos="1 -2 3" dir="-0.3 0.5 -1"/>
+    <camera name="side" pos="2.4 -4.0 1.7" xyaxes="1 0 0 0 0.25 1"/>
+
+    <geom name="floor" type="plane" size="3 3 0.1" rgba="0.82 0.84 0.86 1"/>
+
+    <body name="pedestal" pos="0 0 0">
+      <geom name="base" type="cylinder" size="0.16 0.30" pos="0 0 0.30"
+            rgba="0.20 0.22 0.25 1" contype="0" conaffinity="0"/>
+
+      <body name="link1" pos="0 0 0.60">
+        <joint name="shoulder" range="-2.8 2.8"/>
+        <geom name="link1_geom" fromto="0 0 0 0 0 0.60" size="0.055"
+              rgba="0.08 0.35 0.85 1"/>
+
+        <body name="link2" pos="0 0 0.60">
+          <joint name="elbow" range="-2.8 2.8"/>
+          <geom name="link2_geom" fromto="0 0 0 0 0 0.50" size="0.05"
+                rgba="0.95 0.35 0.04 1"/>
+
+          <site name="end_effector" pos="0 0 0.50" type="sphere" size="0.065"
+                rgba="0.10 0.80 0.20 1"/>
+        </body>
+      </body>
+    </body>
+
+    <site name="target" pos="0.65 0 0.85" type="sphere" size="0.06"
+          rgba="0.90 0.05 0.05 0.75"/>
+  </worldbody>
+
+  <actuator>
+    <position name="shoulder_motor" joint="shoulder" kp="120"
+              ctrlrange="-2.8 2.8" forcerange="-80 80"/>
+    <position name="elbow_motor" joint="elbow" kp="90"
+              ctrlrange="-2.8 2.8" forcerange="-50 50"/>
+  </actuator>
+
+  <sensor>
+    <jointpos name="shoulder_position" joint="shoulder"/>
+    <jointpos name="elbow_position" joint="elbow"/>
+    <jointvel name="shoulder_velocity" joint="shoulder"/>
+    <jointvel name="elbow_velocity" joint="elbow"/>
+    <actuatorfrc name="shoulder_actuator_force" actuator="shoulder_motor"/>
+    <actuatorfrc name="elbow_actuator_force" actuator="elbow_motor"/>
+    <framepos name="end_effector_position" objtype="site" objname="end_effector"/>
+  </sensor>
+
+  <keyframe>
+    <key name="bent" qpos="-0.75 1.45" ctrl="-0.75 1.45"/>
+  </keyframe>
+</mujoco>

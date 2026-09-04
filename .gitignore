@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+
+# Generated training artifacts
+artifacts/*.pt
+artifacts/*.npz
+artifacts/*_metrics.json
+
+# Rendered media
+outputs/
+
+# Local tooling and editor files
+.DS_Store
+.vscode/
+.idea/
