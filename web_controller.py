@@ -23,6 +23,7 @@ INDEX_PATH = ROOT / "static" / "index.html"
 CHECKPOINT_PATH = ROOT / "artifacts" / "ik_mlp.pt"
 DATASET_PATH = ROOT / "artifacts" / "ik_training_data.npz"
 METRICS_PATH = ROOT / "artifacts" / "ik_mlp_metrics.json"
+PPO_METRICS_PATH = ROOT / "artifacts" / "ppo_joint_delta_metrics.json"
 FPS, WIDTH, HEIGHT = 30, 800, 600
 SHOULDER_HEIGHT = 0.60
 
@@ -35,16 +36,23 @@ class Simulation:
         self.renderer = mujoco.Renderer(self.model, height=HEIGHT, width=WIDTH)
         self.camera = mujoco.MjvCamera()
         self.controllers = create_controllers(CHECKPOINT_PATH)
-        self.active_controller = "ik_mlp" if "ik_mlp" in self.controllers else "analytic_ik"
+        self.active_controller = (
+            "ppo_joint_delta" if "ppo_joint_delta" in self.controllers
+            else "ik_mlp" if "ik_mlp" in self.controllers
+            else "analytic_ik"
+        )
         self.target_site_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, "target")
         self.default_target = self.model.site_pos[self.target_site_id].copy()
         self.training_data = np.load(DATASET_PATH) if DATASET_PATH.exists() else None
         self.training_metrics = json.loads(METRICS_PATH.read_text()) if METRICS_PATH.exists() else None
+        self.ppo_metrics = json.loads(PPO_METRICS_PATH.read_text()) if PPO_METRICS_PATH.exists() else None
         self.clients: set[asyncio.Queue[bytes]] = set()
         self.pressed: set[str] = set()
         self.paused = False
         self.motion_speed = 1.0
         self.joint_goal: np.ndarray | None = None
+        self.policy_target_xz: np.ndarray | None = None
+        self.next_policy_time = 0.0
         self.sample_info: dict[str, object] | None = None
         self.message = "Click the robot plane to choose a target"
         self.task: asyncio.Task[None] | None = None
@@ -62,17 +70,23 @@ class Simulation:
         mujoco.mj_resetDataKeyframe(self.model, self.data, key_id)
         self.model.site_pos[self.target_site_id] = self.default_target
         self.joint_goal = None
+        self.policy_target_xz = None
+        self.next_policy_time = 0.0
         self.sample_info = None
         self.message = "Robot reset"
         mujoco.mj_forward(self.model, self.data)
         self.reset_camera()
 
     def observation(self, target_xz: np.ndarray) -> Observation:
-        return Observation(self.data.qpos.copy(), self.data.qvel.copy(), np.asarray(target_xz))
+        return Observation(
+            self.data.qpos.copy(), self.data.qvel.copy(), np.asarray(target_xz), self.data.ctrl.copy()
+        )
 
     def set_controller(self, name: str) -> None:
         if name in self.controllers:
             self.active_controller = name
+            self.joint_goal = None
+            self.policy_target_xz = None
             self.message = f"Using {name}"
         else:
             self.message = f"Controller '{name}' is unavailable"
@@ -91,10 +105,16 @@ class Simulation:
         except ValueError as error:
             self.message = str(error)
             return False
-        if action.action_type is not ActionType.JOINT_POSITION:
+        if action.action_type is ActionType.JOINT_POSITION:
+            self.policy_target_xz = None
+            self.joint_goal = action.values.astype(float)
+        elif action.action_type is ActionType.JOINT_DELTA:
+            self.joint_goal = None
+            self.policy_target_xz = np.asarray(target_xz, dtype=float)
+            self.next_policy_time = self.data.time
+        else:
             self.message = f"Unsupported action type: {action.action_type.value}"
             return False
-        self.joint_goal = action.values.astype(float)
         self.message = f"Moving with {name}"
         return True
 
@@ -103,6 +123,7 @@ class Simulation:
         if down:
             if key in {"q", "a", "w", "s"}:
                 self.joint_goal = None
+                self.policy_target_xz = None
                 self.sample_info = None
             if key == "r":
                 self.reset()
@@ -177,6 +198,19 @@ class Simulation:
         }
         self.message = f"Training sample {index}: {mode}"
 
+    def apply_policy_controls(self) -> None:
+        # PPO was trained at 50 Hz. Rendering at 30 FPS must not change its dynamics.
+        if self.policy_target_xz is None or self.data.time + 1e-9 < self.next_policy_time:
+            return
+        controller = self.controllers[self.active_controller]
+        action = controller.predict(self.observation(self.policy_target_xz))
+        if action.action_type is ActionType.JOINT_DELTA:
+            self.data.ctrl[:] = np.clip(
+                self.data.qpos + 0.40 * action.values * self.motion_speed,
+                self.model.actuator_ctrlrange[:, 0], self.model.actuator_ctrlrange[:, 1],
+            )
+        self.next_policy_time = self.data.time + 0.02
+
     def apply_controls(self, dt: float) -> None:
         if self.joint_goal is not None:
             delta = self.joint_goal - self.data.ctrl
@@ -221,6 +255,7 @@ class Simulation:
             if not self.paused:
                 target_time = self.data.time + frame_dt
                 while self.data.time < target_time:
+                    self.apply_policy_controls()
                     self.apply_gravity_compensation()
                     mujoco.mj_step(self.model, self.data)
             frame = self.render_jpeg()
@@ -237,6 +272,10 @@ class Simulation:
         error = float(np.linalg.norm(self.data.site("end_effector").xpos - target))
         if self.joint_goal is not None and error < 0.015:
             self.message = "Target reached"
+        if self.policy_target_xz is not None and error < 0.02 and np.linalg.norm(self.data.qvel) < 0.1:
+            self.message = "Target reached"
+        elif self.policy_target_xz is not None:
+            self.message = f"Moving with {self.active_controller}"
         return json.dumps({
             "type": "status", "qpos": self.data.qpos.tolist(),
             "ctrl": self.data.ctrl.tolist(), "paused": self.paused,
@@ -253,6 +292,7 @@ class Simulation:
             "controllers": list(self.controllers),
             "active_controller": self.active_controller,
             "training_metrics": metrics,
+            "ppo_metrics": self.ppo_metrics,
             "training_samples": len(self.training_data["current_q"]) if self.training_data is not None else 0,
         }
 

@@ -14,7 +14,8 @@ RUN python -m pip install --no-cache-dir \
     mujoco==3.3.7 \
     mediapy==1.2.4 \
     fastapi==0.116.1 \
-    "uvicorn[standard]==0.35.0"
+    "uvicorn[standard]==0.35.0" \
+    wandb==0.29.0
 
 ENV MUJOCO_GL=egl
 WORKDIR /workspace

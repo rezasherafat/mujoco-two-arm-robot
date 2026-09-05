@@ -6,6 +6,9 @@ artifacts/*.pt
 artifacts/*.npz
 artifacts/*_metrics.json
 
+# Weights & Biases local run data
+wandb/
+
 # Rendered media
 outputs/
 

@@ -20,6 +20,7 @@ class Observation:
     current_q: np.ndarray
     qvel: np.ndarray
     target_xz: np.ndarray
+    q_command: np.ndarray | None = None
 
 
 @dataclass(frozen=True)
