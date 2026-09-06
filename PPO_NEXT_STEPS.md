@@ -67,9 +67,8 @@ In `training/train_ppo_joint_delta.py`:
    critic.
 2. **The reward pays per step while settled** (`HOLD_BONUS = 1.0`, gated on the
    same `<2 cm` and `<0.25 rad/s` predicate) instead of paying +10 once for a
-   five-step streak. It is the only positive term and it is unreachable outside the
-   success region, so hovering still cannot earn it — but an arm dithered through
-   the goal now collects it only on the steps it is actually inside.
+   five-step streak. An arm dithered through the goal now collects it only on the
+   steps it is actually inside.
 3. **A reach counts only after `HOLD_STEPS = 25` (0.5 s) of continuous settling**,
    after which the arm is **re-targeted in place** rather than reset. Chaining
    reaches inside one episode keeps target throughput up and makes the settled
@@ -99,6 +98,68 @@ being reported.
 
 **This is untested as a training result.** The mechanism is measured; the benefit
 is not. It needs the multi-seed protocol below before any claim.
+
+## The revised reward
+
+The per-step reward was also replaced, targeting the precision failures above. Old
+and new, with per-step magnitudes measured against real trajectories:
+
+| term | old | new |
+| --- | --- | --- |
+| traverse shaping | `10 * progress` | unchanged |
+| coarse time cost | `-sqrt(d + 1e-6)` | unchanged |
+| precision well | — | `+2.0 * (exp(-(d/0.02)^2) - exp(-1))` |
+| velocity | `-1e-4 * ||qvel||^2` (max −0.0008, dead) | `-0.2 * ||qvel||^2 * exp(-(d/0.05)^2)` |
+| joint limit | `-0.10 * ||outward||^2` only | plus `-0.1 * sum(max((|q|-2.3)/0.5, 0)^2)` |
+| action magnitude | `-1e-3 * ||a||^2` (max −0.002, dead) | dropped |
+| settled | `+1.0` per step | unchanged |
+
+Three defects were being fixed.
+
+**No gradient where the failures live.** Teacher-assisted failures stop at a median
+best error of 2.4 cm. Across the 2–5 cm band the entire signal saying that is not
+good enough was the `sqrt` term's slope, **0.030 per cm**. The well raises it to
+0.447 per cm at 3 cm and 0.645 at 2.5 cm, while staying negligible beyond 5 cm so
+the traverse and its credit assignment are undisturbed:
+
+| distance | old | new | old slope /cm | new slope /cm |
+| ---: | ---: | ---: | ---: | ---: |
+| 5.0 cm | −0.224 | −0.956 | 0.024 | 0.056 |
+| 3.0 cm | −0.173 | −0.698 | 0.030 | 0.447 |
+| 2.5 cm | −0.158 | −0.475 | 0.033 | 0.645 |
+| 2.0 cm (boundary) | +0.859 | +0.866 | — | — |
+| 1.5 cm | +0.878 | +1.281 | 0.045 | 0.881 |
+| 1.0 cm | +0.900 | +1.722 | 0.059 | 0.701 |
+
+The `- exp(-1)` offset is the load-bearing part: it makes the well exactly zero at
+the success radius, so the weight can be large without the reward ever going
+positive outside the terminal region. Without it, that constraint caps the weight
+at 0.384, which is too weak to matter. `NEAR_SCALE` is bound to `SUCCESS_DISTANCE`
+rather than being a free constant, so the shaping and the criterion cannot drift
+apart the way training and evaluation once did.
+
+**Velocity was unpriced.** At 1e-4, crossing the goal at 2 rad/s cost 0.0004 —
+nothing discouraged the dithering that inflates the success streak. The replacement
+costs −0.77 at 1 cm and 2 rad/s but only −0.012 at the 0.25 rad/s gate, and is zero
+beyond about 12 cm, so it prices crossing the ball fast without making a legitimate
+approach timid.
+
+**The limit penalty priced the action, not the state.** An arm pinned at |q| = 2.7
+with zero action paid nothing, making the stop a free parking spot; 45% of pure-PPO
+failures end there. The dwell term is deliberately a nudge rather than a wall
+(−0.1 per step fully pinned, against a +1.0 hold bonus) because 18.4% of hold-out
+cases genuinely need |q| within 0.3 rad of a stop.
+
+`proximity_reward` is a module-level function so the two properties that make the
+well safe are directly testable, and `tests/test_ppo_task.py` asserts them: strictly
+decreasing in distance over 0–1.2 m, and strictly negative everywhere outside the
+success radius.
+
+The weights come from magnitude analysis, not a sweep. `NEAR_WEIGHT` and
+`APPROACH_VELOCITY_WEIGHT` are the two worth sweeping. Note also that the constant
+offset raises the scale of returns — untrained critic loss goes from about 66 to
+about 227 — so `critic/explained_variance` rather than `loss/value` is the number to
+watch across this change.
 
 ## Finding 2: pure PPO cannot touch a structurally identifiable subpopulation
 

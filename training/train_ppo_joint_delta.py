@@ -29,8 +29,32 @@ SUCCESS_SPEED = 0.25
 SETTLE_STREAK = 5
 HOLD_STEPS = 25
 HOLD_BONUS = 1.0
+# Precision well. The failures this targets stop dead a few millimetres outside
+# tolerance, where the plain sqrt cost has a slope of 0.03 per cm and says almost
+# nothing. Anchoring the well's scale to SUCCESS_DISTANCE keeps the shaping and the
+# criterion from drifting apart.
+NEAR_WEIGHT = 2.0
+NEAR_SCALE = SUCCESS_DISTANCE
+# Speed is priced only near the goal, so the traverse is unaffected.
+APPROACH_SCALE = 0.05
+APPROACH_VELOCITY_WEIGHT = 0.2
+# A joint limit must cost something to sit at, not just to push against.
+LIMIT_MARGIN = 2.3
+LIMIT_WEIGHT = 0.1
 EVAL_EPISODES = 256
 EVAL_INTERVAL = 10
+
+
+def proximity_reward(distance: float) -> float:
+    """Coarse time cost plus a precision well anchored to the success radius.
+
+    The well is offset to be exactly zero at SUCCESS_DISTANCE, which is what lets it
+    be steep without ever making the reward positive outside the terminal region.
+    Strictly decreasing in distance, so closing the last centimetre always pays and
+    holding station short of the goal never does.
+    """
+    well = NEAR_WEIGHT * (np.exp(-(distance / NEAR_SCALE) ** 2) - np.exp(-1.0))
+    return float(well - np.sqrt(distance + 1e-6))
 
 
 class VectorArmEnv:
@@ -148,10 +172,18 @@ class VectorArmEnv:
             progress = self.previous_distance[index] - distance
             limit_fraction = np.maximum((np.abs(data.qpos) - 2.5) / 0.3, 0.0)
             outward = np.maximum(actions[index] * np.sign(data.qpos), 0.0) * limit_fraction
+            # Crossing the goal at speed is what exploration noise does; make it cost.
+            approach = APPROACH_VELOCITY_WEIGHT * np.dot(data.qvel, data.qvel) * np.exp(
+                -(distance / APPROACH_SCALE) ** 2
+            )
+            # The old term priced only the action pushing outward, so an arm already
+            # pinned at a stop with zero action paid nothing to stay there.
+            dwell = LIMIT_WEIGHT * np.square(np.maximum(
+                (np.abs(data.qpos) - LIMIT_MARGIN) / (2.8 - LIMIT_MARGIN), 0.0
+            )).sum()
             reward = (
-                10.0 * progress - np.sqrt(distance + 1e-6)
-                - 0.001 * np.dot(actions[index], actions[index])
-                - 0.0001 * np.dot(data.qvel, data.qvel)
+                10.0 * progress + proximity_reward(distance)
+                - approach - dwell
                 - 0.10 * np.dot(outward, outward)
             )
             if self.ik_reward_weight:
@@ -349,7 +381,11 @@ def main() -> None:
                 "minibatch_size": args.minibatch,
                 "learning_rate": args.learning_rate,
                 "physics_version": "compile-time-gravcomp",
-                "reward_version": "hold-to-complete-settling-bonus",
+                "reward_version": "precision-well-hold-to-complete",
+                "near_weight": NEAR_WEIGHT, "near_scale": NEAR_SCALE,
+                "approach_velocity_weight": APPROACH_VELOCITY_WEIGHT,
+                "approach_scale": APPROACH_SCALE,
+                "limit_weight": LIMIT_WEIGHT, "limit_margin": LIMIT_MARGIN,
                 "training_hold_steps": HOLD_STEPS,
                 "hold_bonus": HOLD_BONUS,
                 "final_log_std": args.final_log_std,
@@ -552,7 +588,7 @@ def main() -> None:
                     "action": "continuous normalized q-relative joint offset in [-1,1]^2",
                     "max_training_delta_rad": MAX_DELTA,
                     "physics_version": "compile-time-gravcomp",
-                    "reward_version": "hold-to-complete-settling-bonus",
+                    "reward_version": "precision-well-hold-to-complete",
                     "training_hold_steps": HOLD_STEPS,
                     "final_log_std": args.final_log_std,
                     "control_steps": CONTROL_STEPS,
@@ -610,7 +646,13 @@ def main() -> None:
             "success_distance_m": SUCCESS_DISTANCE, "success_speed_rad_s": SUCCESS_SPEED,
             "success_hold_steps": SETTLE_STREAK, "episode_steps": MAX_EPISODE_STEPS,
             "architecture": "separate 10-128-128-2 actor and 10-128-128-1 critic",
-            "reward": "10*progress - sqrt(distance+1e-6) - .001*action^2 - .0001*velocity^2 - .1*outward_limit^2 + 1.0 per step while settled",
+            "reward": "10*progress - sqrt(distance+1e-6) + 2*(exp(-(d/.02)^2)-exp(-1)) "
+                      "- .2*velocity^2*exp(-(d/.05)^2) - .1*limit_dwell^2 "
+                      "- .1*outward_limit^2 + 1.0 per step while settled",
+            "near_weight": NEAR_WEIGHT, "near_scale": NEAR_SCALE,
+            "approach_velocity_weight": APPROACH_VELOCITY_WEIGHT,
+            "approach_scale": APPROACH_SCALE,
+            "limit_weight": LIMIT_WEIGHT, "limit_margin": LIMIT_MARGIN,
             "episode_termination": "time limit only; a held goal is re-targeted in place",
             "training_hold_steps": HOLD_STEPS, "hold_bonus": HOLD_BONUS,
             "final_log_std": args.final_log_std,
