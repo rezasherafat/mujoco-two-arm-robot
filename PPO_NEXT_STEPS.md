@@ -99,10 +99,14 @@ being reported.
 **This is untested as a training result.** The mechanism is measured; the benefit
 is not. It needs the multi-seed protocol below before any claim.
 
-## The revised reward
+## Rejected reward-shaping experiment (historical)
 
-The per-step reward was also replaced, targeting the precision failures above. Old
-and new, with per-step magnitudes measured against real trajectories:
+The per-step reward was temporarily replaced to target the precision failures above.
+The browser benchmark later measured 20% success for the most simplified variant,
+65% for the intermediate variant, and 70% for the original reward. The experiment
+was therefore removed from executable code and the original reward restored as the
+only PPO objective. This section is retained only as a postmortem. Original and
+experimental terms, with per-step magnitudes measured against real trajectories:
 
 | term | old | new |
 | --- | --- | --- |
@@ -110,11 +114,11 @@ and new, with per-step magnitudes measured against real trajectories:
 | coarse time cost | `-sqrt(d + 1e-6)` | unchanged |
 | precision well | — | `+2.0 * (exp(-(d/0.02)^2) - exp(-1))` |
 | velocity | `-1e-4 * ||qvel||^2` (max −0.0008, dead) | `-0.2 * ||qvel||^2 * exp(-(d/0.05)^2)` |
-| joint limit | `-0.10 * ||outward||^2` only | plus `-0.1 * sum(max((|q|-2.3)/0.5, 0)^2)` |
+| joint limit | `-0.10 * ||outward||^2` | dropped |
 | action magnitude | `-1e-3 * ||a||^2` (max −0.002, dead) | dropped |
 | settled | `+1.0` per step | unchanged |
 
-Three defects were being fixed.
+Two defects were being fixed, and the limit terms were dropped outright.
 
 **No gradient where the failures live.** Teacher-assisted failures stop at a median
 best error of 2.4 cm. Across the 2–5 cm band the entire signal saying that is not
@@ -144,19 +148,27 @@ costs −0.77 at 1 cm and 2 rad/s but only −0.012 at the 0.25 rad/s gate, and 
 beyond about 12 cm, so it prices crossing the ball fast without making a legitimate
 approach timid.
 
-**The limit penalty priced the action, not the state.** An arm pinned at |q| = 2.7
-with zero action paid nothing, making the stop a free parking spot; 45% of pure-PPO
-failures end there. The dwell term is deliberately a nudge rather than a wall
-(−0.1 per step fully pinned, against a +1.0 hold bonus) because 18.4% of hold-out
-cases genuinely need |q| within 0.3 rad of a stop.
+**The limit terms were removed in the experiment.** The original reward prices the action pushing outward
+near a stop; a state-based dwell cost was briefly added alongside it and then both
+were dropped in favour of a smaller reward. The reward now has four terms: traverse
+shaping, coarse time cost, precision well, and the near-goal velocity cost, plus the
+hold bonus.
 
-`proximity_reward` is a module-level function so the two properties that make the
-well safe are directly testable, and `tests/test_ppo_task.py` asserts them: strictly
-decreasing in distance over 0–1.2 m, and strictly negative everywhere outside the
-success radius.
+This is a deliberate trade. 45% of pure-PPO failures end pinned at |q| > 2.6 with
+zero action, and nothing in the reward now discourages that directly — the arm is
+steered away from stops only by the fact that reaching the goal pays. The
+counter-argument for dropping them is real too: 18.4% of hold-out cases genuinely
+need |q| within 0.3 rad of a stop, so any limit penalty fights those cases, and a
+term that is a nudge too small to deter a determined policy mostly adds a knob. If
+limit-pinning survives in the failure breakdown of the next run, this is the first
+thing to reconsider.
 
-The weights come from magnitude analysis, not a sweep. `NEAR_WEIGHT` and
-`APPROACH_VELOCITY_WEIGHT` are the two worth sweeping. Note also that the constant
+The discarded implementation exposed `proximity_reward` for direct property tests:
+strictly decreasing in distance over 0–1.2 m, and strictly negative everywhere
+outside the success radius. Those implementation hooks and tests were removed with
+the experiment.
+
+The weights came from magnitude analysis, not a sweep. Note also that the constant
 offset raises the scale of returns — untrained critic loss goes from about 66 to
 about 227 — so `critic/explained_variance` rather than `loss/value` is the number to
 watch across this change.

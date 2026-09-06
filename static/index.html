@@ -33,7 +33,10 @@
   <div class="grid">
     <section class="card">
       <h2>Inference controller</h2>
-      <div class="row"><select id="controller"></select><button id="reloadCheckpoint">Reload checkpoint</button></div>
+      <div class="row">
+        <select id="controller" aria-label="Inference controller"></select>
+        <button id="reloadCheckpoint">Reload checkpoint</button>
+      </div>
       <p id="checkpointStatus">Loads checkpoints from the artifacts directory.</p>
       <p>Click the rendered robot plane to set a target for the selected controller.</p>
       <label>Joint command speed: <strong id="speedValue">1.0 rad/s</strong></label>

@@ -29,32 +29,32 @@ SUCCESS_SPEED = 0.25
 SETTLE_STREAK = 5
 HOLD_STEPS = 25
 HOLD_BONUS = 1.0
-# Precision well. The failures this targets stop dead a few millimetres outside
-# tolerance, where the plain sqrt cost has a slope of 0.03 per cm and says almost
-# nothing. Anchoring the well's scale to SUCCESS_DISTANCE keeps the shaping and the
-# criterion from drifting apart.
-NEAR_WEIGHT = 2.0
-NEAR_SCALE = SUCCESS_DISTANCE
-# Speed is priced only near the goal, so the traverse is unaffected.
-APPROACH_SCALE = 0.05
-APPROACH_VELOCITY_WEIGHT = 0.2
-# A joint limit must cost something to sit at, not just to push against.
-LIMIT_MARGIN = 2.3
-LIMIT_WEIGHT = 0.1
 EVAL_EPISODES = 256
 EVAL_INTERVAL = 10
+REWARD_TYPE = "org_reward"
+REWARD_PROVENANCE = "main@3f604ba"
+REWARD_FORMULA = (
+    "10*progress - sqrt(distance+1e-6) - .001*action^2 "
+    "- .0001*velocity^2 - .1*outward_limit^2 + settled_bonus"
+)
 
 
-def proximity_reward(distance: float) -> float:
-    """Coarse time cost plus a precision well anchored to the success radius.
-
-    The well is offset to be exactly zero at SUCCESS_DISTANCE, which is what lets it
-    be steep without ever making the reward positive outside the terminal region.
-    Strictly decreasing in distance, so closing the last centimetre always pays and
-    holding station short of the goal never does.
-    """
-    well = NEAR_WEIGHT * (np.exp(-(distance / NEAR_SCALE) ** 2) - np.exp(-1.0))
-    return float(well - np.sqrt(distance + 1e-6))
+def task_reward(
+    distance: float,
+    progress: float,
+    action: np.ndarray,
+    qvel: np.ndarray,
+    qpos: np.ndarray,
+) -> float:
+    """Compute the original PPO reward before the common settled bonus."""
+    limit_fraction = np.maximum((np.abs(qpos) - 2.5) / 0.3, 0.0)
+    outward = np.maximum(action * np.sign(qpos), 0.0) * limit_fraction
+    return float(
+        10.0 * progress - np.sqrt(distance + 1e-6)
+        - 0.001 * np.dot(action, action)
+        - 0.0001 * np.dot(qvel, qvel)
+        - 0.10 * np.dot(outward, outward)
+    )
 
 
 class VectorArmEnv:
@@ -170,21 +170,8 @@ class VectorArmEnv:
             distance = np.linalg.norm(self.targets[index] - forward_kinematics(data.qpos))
             speed = np.linalg.norm(data.qvel)
             progress = self.previous_distance[index] - distance
-            limit_fraction = np.maximum((np.abs(data.qpos) - 2.5) / 0.3, 0.0)
-            outward = np.maximum(actions[index] * np.sign(data.qpos), 0.0) * limit_fraction
-            # Crossing the goal at speed is what exploration noise does; make it cost.
-            approach = APPROACH_VELOCITY_WEIGHT * np.dot(data.qvel, data.qvel) * np.exp(
-                -(distance / APPROACH_SCALE) ** 2
-            )
-            # The old term priced only the action pushing outward, so an arm already
-            # pinned at a stop with zero action paid nothing to stay there.
-            dwell = LIMIT_WEIGHT * np.square(np.maximum(
-                (np.abs(data.qpos) - LIMIT_MARGIN) / (2.8 - LIMIT_MARGIN), 0.0
-            )).sum()
-            reward = (
-                10.0 * progress + proximity_reward(distance)
-                - approach - dwell
-                - 0.10 * np.dot(outward, outward)
+            reward = task_reward(
+                distance, progress, actions[index], data.qvel, data.qpos
             )
             if self.ik_reward_weight:
                 # Optional privileged reward, not an input or an inference-time fallback.
@@ -306,7 +293,11 @@ def main() -> None:
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--minibatch", type=int, default=1024)
     parser.add_argument("--seed", type=int, default=11)
-    parser.add_argument("--output-dir", type=Path, default=ROOT / "artifacts")
+    parser.add_argument(
+        "--output-dir", type=Path,
+        default=ROOT / "artifacts" / REWARD_TYPE,
+        help="Checkpoint directory (default: artifacts/org_reward)",
+    )
     parser.add_argument("--eval-episodes", type=int, default=EVAL_EPISODES)
     parser.add_argument("--eval-interval", type=int, default=EVAL_INTERVAL)
     parser.add_argument("--learning-rate", type=float, default=3e-4)
@@ -342,9 +333,10 @@ def main() -> None:
         parser.error("Exploration anneal fraction must be in (0, 1]")
     if args.final_log_std > args.initial_log_std:
         parser.error("Final log_std must not exceed the initial value")
-    args.output_dir.mkdir(parents=True, exist_ok=True)
-    checkpoint_path = args.output_dir / "ppo_joint_delta.pt"
-    metrics_path = args.output_dir / "ppo_joint_delta_metrics.json"
+    output_dir = args.output_dir
+    output_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_path = output_dir / "ppo_joint_delta.pt"
+    metrics_path = output_dir / "ppo_joint_delta_metrics.json"
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     torch.set_num_threads(1)
@@ -367,7 +359,8 @@ def main() -> None:
         wandb_run = wandb.init(
             project=args.wandb_project,
             entity=args.wandb_entity,
-            name=args.wandb_run_name,
+            name=args.wandb_run_name or "ppo-org-reward",
+            job_type=REWARD_TYPE,
             mode=args.wandb_mode,
             config={
                 "algorithm": "PPO",
@@ -381,11 +374,9 @@ def main() -> None:
                 "minibatch_size": args.minibatch,
                 "learning_rate": args.learning_rate,
                 "physics_version": "compile-time-gravcomp",
-                "reward_version": "precision-well-hold-to-complete",
-                "near_weight": NEAR_WEIGHT, "near_scale": NEAR_SCALE,
-                "approach_velocity_weight": APPROACH_VELOCITY_WEIGHT,
-                "approach_scale": APPROACH_SCALE,
-                "limit_weight": LIMIT_WEIGHT, "limit_margin": LIMIT_MARGIN,
+                "reward_type": REWARD_TYPE,
+                "reward_formula": REWARD_FORMULA,
+                "reward_provenance": REWARD_PROVENANCE,
                 "training_hold_steps": HOLD_STEPS,
                 "hold_bonus": HOLD_BONUS,
                 "final_log_std": args.final_log_std,
@@ -588,7 +579,9 @@ def main() -> None:
                     "action": "continuous normalized q-relative joint offset in [-1,1]^2",
                     "max_training_delta_rad": MAX_DELTA,
                     "physics_version": "compile-time-gravcomp",
-                    "reward_version": "precision-well-hold-to-complete",
+                    "reward_type": REWARD_TYPE,
+                    "reward_formula": REWARD_FORMULA,
+                    "reward_provenance": REWARD_PROVENANCE,
                     "training_hold_steps": HOLD_STEPS,
                     "final_log_std": args.final_log_std,
                     "control_steps": CONTROL_STEPS,
@@ -646,13 +639,9 @@ def main() -> None:
             "success_distance_m": SUCCESS_DISTANCE, "success_speed_rad_s": SUCCESS_SPEED,
             "success_hold_steps": SETTLE_STREAK, "episode_steps": MAX_EPISODE_STEPS,
             "architecture": "separate 10-128-128-2 actor and 10-128-128-1 critic",
-            "reward": "10*progress - sqrt(distance+1e-6) + 2*(exp(-(d/.02)^2)-exp(-1)) "
-                      "- .2*velocity^2*exp(-(d/.05)^2) - .1*limit_dwell^2 "
-                      "- .1*outward_limit^2 + 1.0 per step while settled",
-            "near_weight": NEAR_WEIGHT, "near_scale": NEAR_SCALE,
-            "approach_velocity_weight": APPROACH_VELOCITY_WEIGHT,
-            "approach_scale": APPROACH_SCALE,
-            "limit_weight": LIMIT_WEIGHT, "limit_margin": LIMIT_MARGIN,
+            "reward_type": REWARD_TYPE,
+            "reward": REWARD_FORMULA,
+            "reward_provenance": REWARD_PROVENANCE,
             "episode_termination": "time limit only; a held goal is re-targeted in place",
             "training_hold_steps": HOLD_STEPS, "hold_bonus": HOLD_BONUS,
             "final_log_std": args.final_log_std,

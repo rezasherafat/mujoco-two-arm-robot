@@ -23,7 +23,8 @@ INDEX_PATH = ROOT / "static" / "index.html"
 CHECKPOINT_PATH = ROOT / "artifacts" / "ik_mlp.pt"
 DATASET_PATH = ROOT / "artifacts" / "ik_training_data.npz"
 METRICS_PATH = ROOT / "artifacts" / "ik_mlp_metrics.json"
-PPO_METRICS_PATH = ROOT / "artifacts" / "ppo_joint_delta_metrics.json"
+PPO_CHECKPOINT_PATH = ROOT / "artifacts" / "org_reward" / "ppo_joint_delta.pt"
+PPO_METRICS_PATH = ROOT / "artifacts" / "org_reward" / "ppo_joint_delta_metrics.json"
 FPS, WIDTH, HEIGHT = 30, 800, 600
 SHOULDER_HEIGHT = 0.60
 
@@ -45,7 +46,9 @@ class Simulation:
         self.default_target = self.model.site_pos[self.target_site_id].copy()
         self.training_data = np.load(DATASET_PATH) if DATASET_PATH.exists() else None
         self.training_metrics = json.loads(METRICS_PATH.read_text()) if METRICS_PATH.exists() else None
-        self.ppo_metrics = json.loads(PPO_METRICS_PATH.read_text()) if PPO_METRICS_PATH.exists() else None
+        self.ppo_metrics = (
+            json.loads(PPO_METRICS_PATH.read_text()) if PPO_METRICS_PATH.exists() else None
+        )
         self.clients: set[asyncio.Queue[bytes]] = set()
         self.pressed: set[str] = set()
         self.paused = False
@@ -92,11 +95,10 @@ class Simulation:
             self.message = f"Controller '{name}' is unavailable"
 
     def checkpoint_info(self) -> list[dict[str, object]]:
-        paths = (CHECKPOINT_PATH, CHECKPOINT_PATH.with_name("ppo_joint_delta.pt"))
         return [
-            {"name": path.name, "size_bytes": path.stat().st_size,
+            {"name": str(path.relative_to(ROOT)), "size_bytes": path.stat().st_size,
              "modified_ns": path.stat().st_mtime_ns}
-            for path in paths if path.exists()
+            for path in (CHECKPOINT_PATH, PPO_CHECKPOINT_PATH) if path.exists()
         ]
 
     def reload_checkpoints(self) -> dict[str, object]:
@@ -107,7 +109,8 @@ class Simulation:
                 json.loads(METRICS_PATH.read_text()) if METRICS_PATH.exists() else None
             )
             ppo_metrics = (
-                json.loads(PPO_METRICS_PATH.read_text()) if PPO_METRICS_PATH.exists() else None
+                json.loads(PPO_METRICS_PATH.read_text())
+                if PPO_METRICS_PATH.exists() else None
             )
             checkpoint_info = self.checkpoint_info()
         except Exception as error:

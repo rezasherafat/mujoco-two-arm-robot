@@ -12,11 +12,25 @@ from controllers.ppo_joint_delta import encode_ppo_observation
 from training.arm_task import MODEL_PATH
 from training.train_ppo_joint_delta import (
     VectorArmEnv, MAX_EPISODE_STEPS, SETTLE_STREAK, HOLD_STEPS, HOLD_BONUS,
-    SUCCESS_DISTANCE, proximity_reward,
+    task_reward,
 )
 
 
 class ArmTaskTests(unittest.TestCase):
+    def test_original_reward_matches_formula(self):
+        distance, progress = 0.017, 0.004
+        action = np.array([0.7, -0.4])
+        qvel = np.array([0.3, -0.2])
+        qpos = np.array([2.7, -2.6])
+        limit_fraction = np.maximum((np.abs(qpos) - 2.5) / 0.3, 0.0)
+        outward = np.maximum(action * np.sign(qpos), 0.0) * limit_fraction
+        expected = (
+            10 * progress - np.sqrt(distance + 1e-6)
+            - .001 * np.dot(action, action) - .0001 * np.dot(qvel, qvel)
+            - .1 * np.dot(outward, outward)
+        )
+        self.assertAlmostEqual(task_reward(distance, progress, action, qvel, qpos), expected)
+
     def test_zero_action_holds_under_gravity(self):
         env = VectorArmEnv(16, 123)
         initial = np.array([d.qpos.copy() for d in env.data])
@@ -130,21 +144,6 @@ class ArmTaskTests(unittest.TestCase):
         self.assertTrue(done[0])
         self.assertTrue(info["truncated"][0])
         np.testing.assert_allclose(info["terminal_observations"][0], expected, atol=1e-8)
-
-    def test_precision_well_is_monotone_and_never_pays_outside(self):
-        """The well is steep near the goal only because it is offset to zero at the
-        success radius. Both properties are what keep it from being a hovering bonus."""
-        distances = np.linspace(0.0, 1.2, 4001)
-        values = np.array([proximity_reward(d) for d in distances])
-        self.assertTrue(np.all(np.diff(values) < 0), "closing distance must always pay")
-        outside = distances >= SUCCESS_DISTANCE
-        self.assertLess(values[outside].max(), 0.0)
-        self.assertAlmostEqual(proximity_reward(SUCCESS_DISTANCE),
-                               -np.sqrt(SUCCESS_DISTANCE + 1e-6), places=12)
-        # Steep where the measured failures stop, flat where the traverse happens.
-        near = proximity_reward(0.02) - proximity_reward(0.03)
-        far = proximity_reward(0.50) - proximity_reward(0.51)
-        self.assertGreater(near, 20 * far)
 
     def test_no_positive_reward_outside_the_success_region(self):
         """Hovering still cannot pay: the only positive term is gated on success."""

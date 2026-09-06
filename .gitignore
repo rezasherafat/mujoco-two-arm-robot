@@ -5,6 +5,9 @@ __pycache__/
 artifacts/*.pt
 artifacts/*.npz
 artifacts/*_metrics.json
+artifacts/**/*.pt
+artifacts/**/*.npz
+artifacts/**/*_metrics.json
 
 # Weights & Biases local run data
 wandb/

@@ -32,7 +32,7 @@ ssh -N -L 8000:127.0.0.1:8000 USER@THOR_HOST
 The page supports controller selection, click-to-reach, command-speed control, training-sample playback, label/prediction comparison, validation metrics, and a loss curve.
 
 The **Reload checkpoint** button reloads `artifacts/ik_mlp.pt` and
-`artifacts/ppo_joint_delta.pt` without restarting the simulation. Checkpoints are
+`artifacts/org_reward/ppo_joint_delta.pt` without restarting the simulation. Checkpoints are
 fully loaded before the live controller instances are replaced, so a failed or
 incompatible load leaves the currently running models intact.
 
