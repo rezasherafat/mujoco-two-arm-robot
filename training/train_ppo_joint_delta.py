@@ -31,6 +31,30 @@ HOLD_STEPS = 25
 HOLD_BONUS = 1.0
 EVAL_EPISODES = 256
 EVAL_INTERVAL = 10
+REWARD_TYPE = "org_reward"
+REWARD_PROVENANCE = "main@3f604ba"
+REWARD_FORMULA = (
+    "10*progress - sqrt(distance+1e-6) - .001*action^2 "
+    "- .0001*velocity^2 - .1*outward_limit^2 + settled_bonus"
+)
+
+
+def task_reward(
+    distance: float,
+    progress: float,
+    action: np.ndarray,
+    qvel: np.ndarray,
+    qpos: np.ndarray,
+) -> float:
+    """Compute the original PPO reward before the common settled bonus."""
+    limit_fraction = np.maximum((np.abs(qpos) - 2.5) / 0.3, 0.0)
+    outward = np.maximum(action * np.sign(qpos), 0.0) * limit_fraction
+    return float(
+        10.0 * progress - np.sqrt(distance + 1e-6)
+        - 0.001 * np.dot(action, action)
+        - 0.0001 * np.dot(qvel, qvel)
+        - 0.10 * np.dot(outward, outward)
+    )
 
 
 class VectorArmEnv:
@@ -146,13 +170,8 @@ class VectorArmEnv:
             distance = np.linalg.norm(self.targets[index] - forward_kinematics(data.qpos))
             speed = np.linalg.norm(data.qvel)
             progress = self.previous_distance[index] - distance
-            limit_fraction = np.maximum((np.abs(data.qpos) - 2.5) / 0.3, 0.0)
-            outward = np.maximum(actions[index] * np.sign(data.qpos), 0.0) * limit_fraction
-            reward = (
-                10.0 * progress - np.sqrt(distance + 1e-6)
-                - 0.001 * np.dot(actions[index], actions[index])
-                - 0.0001 * np.dot(data.qvel, data.qvel)
-                - 0.10 * np.dot(outward, outward)
+            reward = task_reward(
+                distance, progress, actions[index], data.qvel, data.qpos
             )
             if self.ik_reward_weight:
                 # Optional privileged reward, not an input or an inference-time fallback.
@@ -274,7 +293,11 @@ def main() -> None:
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--minibatch", type=int, default=1024)
     parser.add_argument("--seed", type=int, default=11)
-    parser.add_argument("--output-dir", type=Path, default=ROOT / "artifacts")
+    parser.add_argument(
+        "--output-dir", type=Path,
+        default=ROOT / "artifacts" / REWARD_TYPE,
+        help="Checkpoint directory (default: artifacts/org_reward)",
+    )
     parser.add_argument("--eval-episodes", type=int, default=EVAL_EPISODES)
     parser.add_argument("--eval-interval", type=int, default=EVAL_INTERVAL)
     parser.add_argument("--learning-rate", type=float, default=3e-4)
@@ -310,9 +333,10 @@ def main() -> None:
         parser.error("Exploration anneal fraction must be in (0, 1]")
     if args.final_log_std > args.initial_log_std:
         parser.error("Final log_std must not exceed the initial value")
-    args.output_dir.mkdir(parents=True, exist_ok=True)
-    checkpoint_path = args.output_dir / "ppo_joint_delta.pt"
-    metrics_path = args.output_dir / "ppo_joint_delta_metrics.json"
+    output_dir = args.output_dir
+    output_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_path = output_dir / "ppo_joint_delta.pt"
+    metrics_path = output_dir / "ppo_joint_delta_metrics.json"
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     torch.set_num_threads(1)
@@ -335,7 +359,8 @@ def main() -> None:
         wandb_run = wandb.init(
             project=args.wandb_project,
             entity=args.wandb_entity,
-            name=args.wandb_run_name,
+            name=args.wandb_run_name or "ppo-org-reward",
+            job_type=REWARD_TYPE,
             mode=args.wandb_mode,
             config={
                 "algorithm": "PPO",
@@ -349,7 +374,9 @@ def main() -> None:
                 "minibatch_size": args.minibatch,
                 "learning_rate": args.learning_rate,
                 "physics_version": "compile-time-gravcomp",
-                "reward_version": "hold-to-complete-settling-bonus",
+                "reward_type": REWARD_TYPE,
+                "reward_formula": REWARD_FORMULA,
+                "reward_provenance": REWARD_PROVENANCE,
                 "training_hold_steps": HOLD_STEPS,
                 "hold_bonus": HOLD_BONUS,
                 "final_log_std": args.final_log_std,
@@ -552,7 +579,9 @@ def main() -> None:
                     "action": "continuous normalized q-relative joint offset in [-1,1]^2",
                     "max_training_delta_rad": MAX_DELTA,
                     "physics_version": "compile-time-gravcomp",
-                    "reward_version": "hold-to-complete-settling-bonus",
+                    "reward_type": REWARD_TYPE,
+                    "reward_formula": REWARD_FORMULA,
+                    "reward_provenance": REWARD_PROVENANCE,
                     "training_hold_steps": HOLD_STEPS,
                     "final_log_std": args.final_log_std,
                     "control_steps": CONTROL_STEPS,
@@ -610,7 +639,9 @@ def main() -> None:
             "success_distance_m": SUCCESS_DISTANCE, "success_speed_rad_s": SUCCESS_SPEED,
             "success_hold_steps": SETTLE_STREAK, "episode_steps": MAX_EPISODE_STEPS,
             "architecture": "separate 10-128-128-2 actor and 10-128-128-1 critic",
-            "reward": "10*progress - sqrt(distance+1e-6) - .001*action^2 - .0001*velocity^2 - .1*outward_limit^2 + 1.0 per step while settled",
+            "reward_type": REWARD_TYPE,
+            "reward": REWARD_FORMULA,
+            "reward_provenance": REWARD_PROVENANCE,
             "episode_termination": "time limit only; a held goal is re-targeted in place",
             "training_hold_steps": HOLD_STEPS, "hold_bonus": HOLD_BONUS,
             "final_log_std": args.final_log_std,

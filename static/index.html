@@ -33,7 +33,11 @@
   <div class="grid">
     <section class="card">
       <h2>Inference controller</h2>
-      <select id="controller"></select>
+      <div class="row">
+        <select id="controller" aria-label="Inference controller"></select>
+        <button id="reloadCheckpoint">Reload checkpoint</button>
+      </div>
+      <p id="checkpointStatus">Loads checkpoints from the artifacts directory.</p>
       <p>Click the rendered robot plane to set a target for the selected controller.</p>
       <label>Joint command speed: <strong id="speedValue">1.0 rad/s</strong></label>
       <input id="speed" type="range" min="0.1" max="2.5" step="0.1" value="1.0">
@@ -69,6 +73,7 @@ const hud=document.querySelector('#hud'),connection=document.querySelector('#con
 const speed=document.querySelector('#speed'),speedValue=document.querySelector('#speedValue');
 const controller=document.querySelector('#controller'),sampleDetails=document.querySelector('#sampleDetails');
 const usePrediction=document.querySelector('#usePrediction');
+const reloadCheckpoint=document.querySelector('#reloadCheckpoint'),checkpointStatus=document.querySelector('#checkpointStatus');
 let socket,sampleIndex=0,sampleCount=0; const held=new Set();
 function send(payload){if(socket?.readyState===WebSocket.OPEN)socket.send(JSON.stringify(payload));}
 function sendKey(key,down){key=key.toLowerCase();if(!socket||socket.readyState!==WebSocket.OPEN)return;if(down&&held.has(key))return;down?held.add(key):held.delete(key);send({type:'key',key,down});document.querySelectorAll('[data-key]').forEach(b=>{if(b.dataset.key===key)b.classList.toggle('active',down)});}
@@ -94,6 +99,15 @@ canvas.addEventListener('pointerup',e=>{
 });
 canvas.addEventListener('pointercancel',()=>{draggingTarget=false});
 speed.addEventListener('input',()=>{speedValue.textContent=`${Number(speed.value).toFixed(1)} rad/s`;send({type:'speed',value:Number(speed.value)})});controller.addEventListener('change',()=>send({type:'controller',name:controller.value}));
+reloadCheckpoint.addEventListener('click',async()=>{
+  reloadCheckpoint.disabled=true;checkpointStatus.textContent='Reloading checkpoints…';
+  try{
+    const result=await fetch('/api/reload-checkpoints',{method:'POST'}).then(r=>r.json());
+    checkpointStatus.textContent=result.message;
+    if(result.ok)await loadInfo();
+  }catch(error){checkpointStatus.textContent=`Reload failed: ${error.message}`}
+  finally{reloadCheckpoint.disabled=false}
+});
 function showSample(){if(sampleCount)send({type:'training_sample',index:sampleIndex,prediction:usePrediction.checked});}
 document.querySelector('#previous').onclick=()=>{sampleIndex=(sampleIndex-1+sampleCount)%sampleCount;showSample()};document.querySelector('#next').onclick=()=>{sampleIndex=(sampleIndex+1)%sampleCount;showSample()};document.querySelector('#random').onclick=()=>{sampleIndex=Math.floor(Math.random()*sampleCount);showSample()};usePrediction.onchange=showSample;
 addEventListener('keydown',e=>{if(['q','a','w','s','r','c',' ','arrowleft','arrowright','arrowup','arrowdown','-','=','+'].includes(e.key.toLowerCase())){e.preventDefault();sendKey(e.key,true)}});addEventListener('keyup',e=>sendKey(e.key,false));addEventListener('blur',()=>[...held].forEach(k=>sendKey(k,false)));document.querySelectorAll('[data-key]').forEach(b=>{const k=b.dataset.key;b.onpointerdown=e=>{e.preventDefault();b.setPointerCapture(e.pointerId);sendKey(k,true)};b.onpointerup=()=>sendKey(k,false);b.onpointercancel=()=>sendKey(k,false)});connect();

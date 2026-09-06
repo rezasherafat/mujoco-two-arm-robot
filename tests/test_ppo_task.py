@@ -1,5 +1,6 @@
 """Regression checks for physics and rollout bugs that blocked PPO reaching."""
 import unittest
+from unittest.mock import patch
 
 import mujoco
 import numpy as np
@@ -11,10 +12,25 @@ from controllers.ppo_joint_delta import encode_ppo_observation
 from training.arm_task import MODEL_PATH
 from training.train_ppo_joint_delta import (
     VectorArmEnv, MAX_EPISODE_STEPS, SETTLE_STREAK, HOLD_STEPS, HOLD_BONUS,
+    task_reward,
 )
 
 
 class ArmTaskTests(unittest.TestCase):
+    def test_original_reward_matches_formula(self):
+        distance, progress = 0.017, 0.004
+        action = np.array([0.7, -0.4])
+        qvel = np.array([0.3, -0.2])
+        qpos = np.array([2.7, -2.6])
+        limit_fraction = np.maximum((np.abs(qpos) - 2.5) / 0.3, 0.0)
+        outward = np.maximum(action * np.sign(qpos), 0.0) * limit_fraction
+        expected = (
+            10 * progress - np.sqrt(distance + 1e-6)
+            - .001 * np.dot(action, action) - .0001 * np.dot(qvel, qvel)
+            - .1 * np.dot(outward, outward)
+        )
+        self.assertAlmostEqual(task_reward(distance, progress, action, qvel, qpos), expected)
+
     def test_zero_action_holds_under_gravity(self):
         env = VectorArmEnv(16, 123)
         initial = np.array([d.qpos.copy() for d in env.data])
@@ -82,6 +98,42 @@ class ArmTaskTests(unittest.TestCase):
             sim.apply_gravity_compensation()
             mujoco.mj_step(sim.model, sim.data)
         self.assertEqual(policy.calls, 50)
+
+    def test_checkpoint_reload_preserves_active_controller(self):
+        from web_controller import Simulation
+
+        old_controller = object()
+        new_controller = object()
+        sim = Simulation.__new__(Simulation)
+        sim.controllers = {"ppo_joint_delta": old_controller}
+        sim.active_controller = "ppo_joint_delta"
+        sim.joint_goal = None
+        sim.policy_target_xz = np.array([0.1, 0.2])
+        sim.training_metrics = None
+        sim.ppo_metrics = None
+        sim.message = ""
+        with patch("web_controller.create_controllers",
+                   return_value={"ppo_joint_delta": new_controller}), \
+             patch.object(Simulation, "checkpoint_info", return_value=[]):
+            result = sim.reload_checkpoints()
+        self.assertTrue(result["ok"])
+        self.assertIs(sim.controllers["ppo_joint_delta"], new_controller)
+        self.assertEqual(sim.active_controller, "ppo_joint_delta")
+        np.testing.assert_array_equal(sim.policy_target_xz, [0.1, 0.2])
+
+    def test_failed_checkpoint_reload_keeps_live_controller(self):
+        from web_controller import Simulation
+
+        old_controller = object()
+        sim = Simulation.__new__(Simulation)
+        sim.controllers = {"ppo_joint_delta": old_controller}
+        sim.active_controller = "ppo_joint_delta"
+        sim.message = ""
+        with patch("web_controller.create_controllers", side_effect=ValueError("bad checkpoint")):
+            result = sim.reload_checkpoints()
+        self.assertFalse(result["ok"])
+        self.assertIs(sim.controllers["ppo_joint_delta"], old_controller)
+        self.assertIn("bad checkpoint", result["message"])
 
     def test_timeout_returns_final_observation_before_reset(self):
         env = VectorArmEnv(1, 99)
