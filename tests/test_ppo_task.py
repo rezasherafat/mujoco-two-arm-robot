@@ -1,5 +1,6 @@
 """Regression checks for physics and rollout bugs that blocked PPO reaching."""
 import unittest
+from unittest.mock import patch
 
 import mujoco
 import numpy as np
@@ -82,6 +83,42 @@ class ArmTaskTests(unittest.TestCase):
             sim.apply_gravity_compensation()
             mujoco.mj_step(sim.model, sim.data)
         self.assertEqual(policy.calls, 50)
+
+    def test_checkpoint_reload_preserves_active_controller(self):
+        from web_controller import Simulation
+
+        old_controller = object()
+        new_controller = object()
+        sim = Simulation.__new__(Simulation)
+        sim.controllers = {"ppo_joint_delta": old_controller}
+        sim.active_controller = "ppo_joint_delta"
+        sim.joint_goal = None
+        sim.policy_target_xz = np.array([0.1, 0.2])
+        sim.training_metrics = None
+        sim.ppo_metrics = None
+        sim.message = ""
+        with patch("web_controller.create_controllers",
+                   return_value={"ppo_joint_delta": new_controller}), \
+             patch.object(Simulation, "checkpoint_info", return_value=[]):
+            result = sim.reload_checkpoints()
+        self.assertTrue(result["ok"])
+        self.assertIs(sim.controllers["ppo_joint_delta"], new_controller)
+        self.assertEqual(sim.active_controller, "ppo_joint_delta")
+        np.testing.assert_array_equal(sim.policy_target_xz, [0.1, 0.2])
+
+    def test_failed_checkpoint_reload_keeps_live_controller(self):
+        from web_controller import Simulation
+
+        old_controller = object()
+        sim = Simulation.__new__(Simulation)
+        sim.controllers = {"ppo_joint_delta": old_controller}
+        sim.active_controller = "ppo_joint_delta"
+        sim.message = ""
+        with patch("web_controller.create_controllers", side_effect=ValueError("bad checkpoint")):
+            result = sim.reload_checkpoints()
+        self.assertFalse(result["ok"])
+        self.assertIs(sim.controllers["ppo_joint_delta"], old_controller)
+        self.assertIn("bad checkpoint", result["message"])
 
     def test_timeout_returns_final_observation_before_reset(self):
         env = VectorArmEnv(1, 99)

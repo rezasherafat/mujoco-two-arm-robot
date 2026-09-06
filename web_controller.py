@@ -91,6 +91,52 @@ class Simulation:
         else:
             self.message = f"Controller '{name}' is unavailable"
 
+    def checkpoint_info(self) -> list[dict[str, object]]:
+        paths = (CHECKPOINT_PATH, CHECKPOINT_PATH.with_name("ppo_joint_delta.pt"))
+        return [
+            {"name": path.name, "size_bytes": path.stat().st_size,
+             "modified_ns": path.stat().st_mtime_ns}
+            for path in paths if path.exists()
+        ]
+
+    def reload_checkpoints(self) -> dict[str, object]:
+        """Load all controller files before atomically replacing live instances."""
+        try:
+            reloaded = create_controllers(CHECKPOINT_PATH)
+            training_metrics = (
+                json.loads(METRICS_PATH.read_text()) if METRICS_PATH.exists() else None
+            )
+            ppo_metrics = (
+                json.loads(PPO_METRICS_PATH.read_text()) if PPO_METRICS_PATH.exists() else None
+            )
+            checkpoint_info = self.checkpoint_info()
+        except Exception as error:
+            self.message = f"Checkpoint reload failed: {type(error).__name__}: {error}"
+            return {"ok": False, "message": self.message,
+                    "controllers": list(self.controllers)}
+
+        previous_active = self.active_controller
+        if previous_active not in reloaded:
+            previous_active = (
+                "ppo_joint_delta" if "ppo_joint_delta" in reloaded
+                else "ik_mlp" if "ik_mlp" in reloaded
+                else "analytic_ik"
+            )
+            self.joint_goal = None
+            self.policy_target_xz = None
+        self.controllers = reloaded
+        self.active_controller = previous_active
+        self.training_metrics = training_metrics
+        self.ppo_metrics = ppo_metrics
+        loaded = ", ".join(item["name"] for item in checkpoint_info) or "no checkpoint files"
+        self.message = f"Reloaded checkpoints: {loaded}"
+        return {
+            "ok": True, "message": self.message,
+            "controllers": list(self.controllers),
+            "active_controller": self.active_controller,
+            "checkpoints": checkpoint_info,
+        }
+
     def set_speed(self, speed: float) -> None:
         self.motion_speed = max(0.1, min(2.5, speed))
 
@@ -337,6 +383,12 @@ async def health() -> dict[str, object]:
 async def info() -> dict[str, object]:
     assert simulation is not None
     return simulation.public_info()
+
+
+@app.post("/api/reload-checkpoints")
+async def reload_checkpoints() -> dict[str, object]:
+    assert simulation is not None
+    return await asyncio.to_thread(simulation.reload_checkpoints)
 
 
 @app.websocket("/ws")
